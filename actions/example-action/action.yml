@@ -1,0 +1,21 @@
+name: 'Example Action'
+description: 'An example GitHub Action to demonstrate the structure'
+author: 'meldoc-io'
+inputs:
+  input1:
+    description: 'Example input parameter'
+    required: false
+    default: 'default-value'
+outputs:
+  output1:
+    description: 'Example output value'
+    value: 'example-output'
+runs:
+  using: 'composite'
+  steps:
+    - name: Example step
+      shell: bash
+      run: |
+        echo "This is an example action"
+        echo "input1=${{ inputs.input1 }}"
+        echo "output1=example-output" >> $GITHUB_OUTPUT

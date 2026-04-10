@@ -1,0 +1,42 @@
+name: 'Publish Meldoc Documentation'
+description: 'Publish documentation to Meldoc platform'
+inputs:
+  token:
+    description: 'Meldoc authentication token'
+    required: true
+  publish_all:
+    description: 'Publish all documentation (ignore diff)'
+    required: false
+    default: 'false'
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check token
+      id: check-token
+      shell: bash
+      run: |
+        if [[ -z "${{ inputs.token }}" ]]; then
+          echo "MELDOC_TOKEN is not set. Skipping documentation publish."
+          echo "has_token=false" >> $GITHUB_OUTPUT
+          exit 0
+        else
+          echo "has_token=true" >> $GITHUB_OUTPUT
+        fi
+
+    - name: Install Meldoc CLI
+      if: steps.check-token.outputs.has_token == 'true'
+      shell: bash
+      run: |
+        curl -fsSL https://meldoc.io/install.sh | bash -s -- --quiet
+        echo "$HOME/.local/bin" >> $GITHUB_PATH
+
+    - name: Publish documentation
+      if: steps.check-token.outputs.has_token == 'true'
+      shell: bash
+      run: |
+        if [[ "${{ github.event_name }}" == "workflow_dispatch" && "${{ inputs.publish_all }}" == "true" ]]; then
+          meldoc ci --all --token "${{ inputs.token }}"
+        else
+          meldoc ci --token "${{ inputs.token }}"
+        fi

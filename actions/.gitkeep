@@ -1,0 +1,2 @@
+# This directory contains all shared GitHub Actions
+# Each action should be in its own subdirectory with an action.yml file
