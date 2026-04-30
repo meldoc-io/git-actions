@@ -39,6 +39,14 @@ inputs:
     description: 'Extra arguments passed to `meldoc pull`. The default keeps the sync conservative — only files already present locally are updated.'
     required: false
     default: '--local --yes'
+  updated_since:
+    description: 'RFC3339 timestamp passed to `meldoc pull --updated-since`. The server returns content only for documents with `updated_at` strictly after the cutoff. Useful for cron-driven incremental syncs. Wins over `lookback_hours` when both are set.'
+    required: false
+    default: ''
+  lookback_hours:
+    description: 'Convenience knob — when set to a positive integer, the action computes `updated_since` as `now - <lookback_hours>` (UTC, RFC3339) at run time. Ignored when `updated_since` is provided explicitly. Empty / 0 disables the time filter.'
+    required: false
+    default: ''
   auto_merge:
     description: 'When true, the action enables GitHub auto-merge on the created/updated PR. Requires the repository to allow auto-merge.'
     required: false
@@ -85,15 +93,51 @@ runs:
         curl -fsSL https://meldoc.io/install.sh | bash -s -- --quiet
         echo "$HOME/.local/bin" >> "$GITHUB_PATH"
 
+    - name: Resolve updated_since cutoff
+      id: cutoff
+      if: steps.check-token.outputs.has_token == 'true'
+      shell: bash
+      env:
+        UPDATED_SINCE: ${{ inputs.updated_since }}
+        LOOKBACK_HOURS: ${{ inputs.lookback_hours }}
+      run: |
+        # Explicit value wins; otherwise compute from lookback_hours.
+        cutoff=""
+        if [ -n "$UPDATED_SINCE" ]; then
+          cutoff="$UPDATED_SINCE"
+        elif [ -n "$LOOKBACK_HOURS" ] && [ "$LOOKBACK_HOURS" != "0" ]; then
+          if ! [[ "$LOOKBACK_HOURS" =~ ^[0-9]+$ ]]; then
+            echo "::warning title=Meldoc sync::lookback_hours must be a non-negative integer; ignoring '$LOOKBACK_HOURS'"
+          else
+            # Compute UTC cutoff. GNU date supports `-d "$N hours ago"`; runners are Linux.
+            cutoff=$(date -u -d "$LOOKBACK_HOURS hours ago" +%Y-%m-%dT%H:%M:%SZ 2>/dev/null || true)
+            if [ -z "$cutoff" ]; then
+              echo "::warning title=Meldoc sync::failed to compute updated_since from lookback_hours=$LOOKBACK_HOURS; falling back to no time filter"
+            fi
+          fi
+        fi
+
+        if [ -n "$cutoff" ]; then
+          echo "value=$cutoff" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Meldoc sync::Incremental pull from $cutoff"
+        else
+          echo "value=" >> "$GITHUB_OUTPUT"
+        fi
+
     - name: Pull documentation from Meldoc
       if: steps.check-token.outputs.has_token == 'true'
       shell: bash
       env:
         MELDOC_TOKEN: ${{ inputs.token }}
         PULL_ARGS: ${{ inputs.pull_args }}
+        UPDATED_SINCE: ${{ steps.cutoff.outputs.value }}
       run: |
+        since_args=""
+        if [ -n "$UPDATED_SINCE" ]; then
+          since_args="--updated-since $UPDATED_SINCE"
+        fi
         # shellcheck disable=SC2086
-        meldoc pull --token "$MELDOC_TOKEN" $PULL_ARGS
+        meldoc pull --token "$MELDOC_TOKEN" $PULL_ARGS $since_args
 
     - name: Compute diff
       if: steps.check-token.outputs.has_token == 'true'

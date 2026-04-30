@@ -71,6 +71,8 @@ jobs:
 | `labels`         | No       | `documentation,automated`                   | Comma-separated labels applied to the PR                                                                                                                   |
 | `paths`          | No       | `**/*.meldoc.md\nmeldoc.config.yml`         | Newline-separated globs. Files outside these globs are ignored both for diff detection and for the commit, so unrelated working-tree noise stays out       |
 | `pull_args`      | No       | `--local --yes`                             | Extra arguments passed to `meldoc pull`. See `meldoc pull --help` for options like `--tracked`, `--resolve <ours\|theirs\|merge>`, `--no-assets`           |
+| `updated_since`  | No       | `""`                                        | RFC3339 cutoff (e.g. `2026-04-29T00:00:00Z`); forwarded to `meldoc pull --updated-since`. The server returns content only for docs updated **after** the cutoff. Wins over `lookback_hours` |
+| `lookback_hours` | No       | `""`                                        | Convenience for cron: when set to a positive integer, the action computes `updated_since` as `now - <lookback_hours>` (UTC). Empty / `0` disables the time filter |
 | `auto_merge`     | No       | `false`                                     | When `true`, enables GitHub auto-merge on the PR. Requires the repository setting "Allow auto-merge"                                                       |
 | `merge_method`   | No       | `squash`                                    | Merge method passed to `gh pr merge --auto`: `merge`, `squash`, or `rebase`                                                                                |
 
@@ -112,6 +114,37 @@ Emits a `::notice::` annotation and exits with `has_changes=false`. The job stay
 ### Auto-merge for clean syncs
 
 Set `auto_merge: true` when you trust the platform-side editor and want the PR to merge on its own once CI is green. The action calls `gh pr merge --auto --<merge_method>` after the PR is created or updated.
+
+### Incremental sync (`updated_since` / `lookback_hours`)
+
+For repos with hundreds of documents, an incremental pull avoids re-downloading content that hasn't moved on the server. The action exposes two ways to specify the cutoff:
+
+- **`updated_since`** — explicit RFC3339 timestamp. Use when you persist the last successful run time yourself (e.g. via `actions/cache`).
+- **`lookback_hours`** — integer; the action computes `now - lookback_hours` (UTC) at run time. Convenient for fixed cron schedules.
+
+When both are set, `updated_since` wins. The cutoff is forwarded to `meldoc pull --updated-since`; the server reports docs older than the cutoff in the `unchanged` bucket without payload, and only newer docs come back with content.
+
+Example — daily cron that pulls only what moved in the last 25 hours (1-hour overlap to absorb clock skew):
+
+```yaml
+on:
+  schedule:
+    - cron: '0 1 * * *'
+
+jobs:
+  sync:
+    runs-on: ubuntu-latest
+    steps:
+      - uses: actions/checkout@v4
+        with:
+          fetch-depth: 0
+      - uses: meldoc-io/git-actions/actions/sync-docs@sync-docs/v1
+        with:
+          token: ${{ secrets.MELDOC_TOKEN }}
+          github_token: ${{ secrets.GITHUB_TOKEN }}
+          base_branch: main
+          lookback_hours: '25'
+```
 
 ## Token Setup
 
