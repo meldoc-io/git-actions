@@ -1,0 +1,206 @@
+name: 'Review Meldoc Documentation'
+description: 'Advisory AI review of Meldoc docs-vs-code sync, posted as a sticky PR comment.'
+author: 'meldoc-io'
+
+inputs:
+  anthropic_api_key:
+    description: 'Anthropic API key.'
+    required: true
+  prompt:
+    description: 'Full override for the review prompt. The PR context header is still prepended.'
+    required: false
+    default: |
+      # Meldoc Documentation Review
+
+      You are reviewing a pull request for documentation sync and quality. You are **advisory only** — flag concerns, never demand changes. Authors decide what to act on.
+
+      ## Step 1: Classify changed files
+
+      Use `gh pr diff` and `gh pr view` to inspect the PR. For each changed file decide:
+      - **Code-only** (source files in any language)
+      - **Doc-only** (`*.meldoc.md`)
+      - **Both** (both kinds in the same PR)
+
+      ## Step 2: Find semantically related docs
+
+      Do NOT rely on strict path/name conventions. Use `Glob`, `Grep`, and `Read` to find `*.meldoc.md` files that describe the changed code by:
+      - File path proximity (same or sibling directories)
+      - Mentioned symbols, function names, types, endpoints, or flags
+      - Described features and domain terms
+      - Cross-references and frontmatter hints (e.g. `source:`, `see-also:`)
+
+      If you can't find a related doc — that's fine. Not everything needs documentation.
+
+      ## Step 3: Apply checks by category
+
+      ### Code changed
+      For each code change with a related doc, decide if the change affects **documented behavior**:
+      - Public API / function signatures / exported types
+      - User-facing contracts, flags, CLI options, config keys
+      - Schema, protocol, or data-format changes
+      - Observable side effects described in the doc
+
+      **Flag** when documented behavior changed but the doc wasn't updated.
+      **Do NOT flag** when the change is:
+      - Internal refactor with same external contract
+      - Performance tweak, log line, test fixture, typo in identifier
+      - Unrelated-to-doc code that isn't described anywhere
+
+      ### Doc changed (*.meldoc.md)
+      Check the doc for:
+      - Broken internal links (to missing files, missing anchors)
+      - Frontmatter issues (missing required fields per project conventions, duplicates, malformed YAML)
+      - Clearly broken markdown (unclosed code fences, orphan references)
+      - Claims about code that don't hold in the current PR state (dead references to symbols/files that don't exist)
+
+      Do NOT flag style nits, prose phrasing, or missing optional fields.
+
+      ### Both changed
+      Additionally verify the doc changes are consistent with the code changes in the same PR.
+
+      ## Step 4: Threshold
+
+      If the change is tiny, fully internal, or has no documented behavior impact — there's nothing to flag. Never manufacture findings.
+
+      ## Step 5: Output
+
+      Save the **final** comment body using the `Write` tool to the file path given in **Comment file** at the top of this prompt. The action then sticky-upserts a single PR comment from that file — so re-runs replace the same comment instead of stacking new ones. Do **not** call `gh pr comment` directly.
+
+      **Brevity is mandatory.** Pick exactly one of the three templates below.
+
+      ### Required wrapper
+
+      Every body must start with **two** HTML marker lines (the first is for the sticky-upsert lookup, the second is the machine-readable status the action uses for `strict` mode and the `status` output):
+
+      ```
+      <!-- meldoc-review:v1 -->
+      <!-- meldoc-status:clean -->        ← or "findings"
+      ```
+
+      Status values:
+      - `clean` — Templates A and B (no doc update needed, or docs and code in sync)
+      - `findings` — Template C (one or more drift items)
+
+      End the body with a footer line, using the **Job log** URL from the Pull Request Context above:
+
+      ```
+      <sub>Advisory only · [job log](<JOB_URL>)</sub>
+      ```
+
+      ### Template A — no doc update needed (code change touched no documented behavior)
+
+      ```
+      <!-- meldoc-review:v1 -->
+      <!-- meldoc-status:clean -->
+
+      **Meldoc** — no doc update needed for this change.
+
+      <sub>Advisory only · [job log](<JOB_URL>)</sub>
+      ```
+
+      ### Template B — docs and code look in sync (a doc was touched, or both were, and they line up)
+
+      ```
+      <!-- meldoc-review:v1 -->
+      <!-- meldoc-status:clean -->
+
+      **Meldoc** — docs and code look in sync.
+
+      <sub>Advisory only · [job log](<JOB_URL>)</sub>
+      ```
+
+      ### Template C — findings (one or more drift items)
+
+      ```
+      <!-- meldoc-review:v1 -->
+      <!-- meldoc-status:findings -->
+
+      ### Meldoc Review — N possible drift item(s), advisory only
+
+      - `path/to/file.ts` — what's off, suggested action
+      - `path/to/doc.meldoc.md` — what's off, suggested action
+
+      <sub>Advisory only · authors decide what to act on · [job log](<JOB_URL>)</sub>
+      ```
+
+      Rules for Template C:
+      - Replace `N` with the actual number of bullet items
+      - One bullet per file; if a file has multiple issues, combine them into a single concise line
+      - Use suggestion language: "consider…", "may need to reflect…". Never "must" or "required"
+      - Do NOT restate the diff, do NOT list what you searched, do NOT add a closing summary
+      - Target: the bullet list fits in under 8 lines
+  allowed_tools:
+    description: 'Comma-separated list of allowed Claude tools. Must include `Write` so the action can collect the comment body.'
+    required: false
+    default: 'Read,Grep,Glob,Write,Bash(gh pr diff:*),Bash(gh pr view:*)'
+  track_progress:
+    description: |
+      Show progress tracking comments on the PR. Default "false" — keeps the action in
+      agent mode so the prompt above is used as-is. Setting "true" forces tag mode in
+      anthropics/claude-code-action, which wraps the prompt in a generic ~260-line
+      PR-reviewer system prompt and dilutes the Meldoc instructions on large diffs.
+    required: false
+    default: 'false'
+  allowed_bots:
+    description: |
+      Comma-separated list of bot accounts allowed to trigger this review, or '*' for all.
+      anthropics/claude-code-action rejects bot-initiated runs by default; the listed
+      bots bypass that check. Empty by default — override at the call site to add
+      release/dependency bots that should still get reviewed.
+    required: false
+    default: ''
+  comment_marker:
+    description: 'HTML marker used to identify and update the sticky comment across re-runs. Bump the version suffix when you change the comment shape so old comments aren''t overwritten.'
+    required: false
+    default: '<!-- meldoc-review:v1 -->'
+  strict:
+    description: |
+      When "true", fail the workflow step if the review reports findings (status=findings).
+      Default "false" — the action stays advisory: a sticky comment is posted, but the
+      step always succeeds. Enable when you want CI to actively gate doc/code drift.
+      The comment is still posted before the failure, so authors can see what to fix.
+    required: false
+    default: 'false'
+
+outputs:
+  status:
+    description: 'Review outcome detected from the comment body — one of `clean`, `findings`, or `unknown` (e.g. when the model failed to produce a comment).'
+    value: ${{ steps.post.outputs.status }}
+
+runs:
+  using: 'composite'
+  steps:
+    - uses: actions/checkout@v6
+      with:
+        fetch-depth: 1
+
+    - uses: anthropics/claude-code-action@v1
+      with:
+        anthropic_api_key: ${{ inputs.anthropic_api_key }}
+        track_progress: ${{ inputs.track_progress }}
+        allowed_bots: ${{ inputs.allowed_bots }}
+        claude_args: |
+          --allowedTools "${{ inputs.allowed_tools }}"
+        prompt: |
+          ## Pull Request Context
+          - **PR:** #${{ github.event.pull_request.number }} — ${{ github.event.pull_request.title }}
+          - **Branch:** `${{ github.head_ref }}` → `${{ github.base_ref }}`
+          - **Author:** ${{ github.event.pull_request.user.login }}
+          - **Job log:** ${{ github.server_url }}/${{ github.repository }}/actions/runs/${{ github.run_id }}
+          - **Comment file:** `${{ runner.temp }}/meldoc-comment.md` (use the `Write` tool to save the final body here)
+          - **Sticky marker:** `${{ inputs.comment_marker }}` (the body must start with this exact line so re-runs replace the same comment)
+
+          ${{ inputs.prompt }}
+
+    - name: Post sticky Meldoc comment
+      id: post
+      if: ${{ always() && github.event.pull_request }}
+      shell: bash
+      env:
+        GH_TOKEN: ${{ github.token }}
+        BODY_FILE: ${{ runner.temp }}/meldoc-comment.md
+        PR_NUMBER: ${{ github.event.pull_request.number }}
+        REPO: ${{ github.repository }}
+        MARKER: ${{ inputs.comment_marker }}
+        STRICT: ${{ inputs.strict }}
+      run: ${{ github.action_path }}/scripts/sticky-comment.sh

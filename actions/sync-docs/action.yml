@@ -1,0 +1,200 @@
+name: 'Sync Meldoc Documentation'
+description: 'Pull documentation from the Meldoc platform and open a pull request when local files diverge.'
+author: 'meldoc-io'
+
+inputs:
+  token:
+    description: 'Meldoc authentication token. The action exits gracefully if empty.'
+    required: true
+  github_token:
+    description: 'GitHub token used to push the sync branch and open the pull request. Needs contents:write and pull-requests:write.'
+    required: true
+  base_branch:
+    description: 'Branch the PR should target. If empty, the repository default branch is used by create-pull-request.'
+    required: false
+    default: ''
+  pr_branch:
+    description: 'Branch the action pushes the synced commit to.'
+    required: false
+    default: 'docs/auto-sync'
+  pr_title:
+    description: 'Pull request title.'
+    required: false
+    default: 'chore(docs): sync from Meldoc'
+  commit_message:
+    description: 'Commit message used for the synced changes.'
+    required: false
+    default: 'chore(docs): sync from Meldoc'
+  labels:
+    description: 'Comma-separated labels applied to the PR.'
+    required: false
+    default: 'documentation,automated'
+  paths:
+    description: 'Newline-separated globs that are considered documentation files. Files outside these globs are ignored both for diff detection and for the commit.'
+    required: false
+    default: |
+      **/*.meldoc.md
+      meldoc.config.yml
+  pull_args:
+    description: 'Extra arguments passed to `meldoc pull`. The default keeps the sync conservative — only files already present locally are updated.'
+    required: false
+    default: '--local --yes'
+  auto_merge:
+    description: 'When true, the action enables GitHub auto-merge on the created/updated PR. Requires the repository to allow auto-merge.'
+    required: false
+    default: 'false'
+  merge_method:
+    description: 'Merge method used for auto-merge: merge | squash | rebase.'
+    required: false
+    default: 'squash'
+
+outputs:
+  has_changes:
+    description: 'true when `meldoc pull` produced changes that match `paths`.'
+    value: ${{ steps.diff.outputs.has_changes }}
+  changed_files:
+    description: 'Newline-separated list of changed files (empty when has_changes is false).'
+    value: ${{ steps.diff.outputs.files }}
+  pr_number:
+    description: 'Number of the created/updated PR. Empty when has_changes is false.'
+    value: ${{ steps.pr.outputs.pull-request-number }}
+  pr_url:
+    description: 'URL of the created/updated PR. Empty when has_changes is false.'
+    value: ${{ steps.pr.outputs.pull-request-url }}
+
+runs:
+  using: 'composite'
+  steps:
+    - name: Check token
+      id: check-token
+      shell: bash
+      env:
+        MELDOC_TOKEN_INPUT: ${{ inputs.token }}
+      run: |
+        if [ -z "$MELDOC_TOKEN_INPUT" ]; then
+          echo "::notice title=Meldoc sync skipped::token input is empty"
+          echo "has_token=false" >> "$GITHUB_OUTPUT"
+        else
+          echo "has_token=true" >> "$GITHUB_OUTPUT"
+        fi
+
+    - name: Install Meldoc CLI
+      if: steps.check-token.outputs.has_token == 'true'
+      shell: bash
+      run: |
+        curl -fsSL https://meldoc.io/install.sh | bash -s -- --quiet
+        echo "$HOME/.local/bin" >> "$GITHUB_PATH"
+
+    - name: Pull documentation from Meldoc
+      if: steps.check-token.outputs.has_token == 'true'
+      shell: bash
+      env:
+        MELDOC_TOKEN: ${{ inputs.token }}
+        PULL_ARGS: ${{ inputs.pull_args }}
+      run: |
+        # shellcheck disable=SC2086
+        meldoc pull --token "$MELDOC_TOKEN" $PULL_ARGS
+
+    - name: Compute diff
+      if: steps.check-token.outputs.has_token == 'true'
+      id: diff
+      shell: bash
+      env:
+        DOC_PATHS: ${{ inputs.paths }}
+      run: |
+        # Parse newline-separated globs into an array
+        globs=()
+        while IFS= read -r line; do
+          line="${line## }"; line="${line%% }"
+          [ -z "$line" ] && continue
+          globs+=("$line")
+        done <<< "$DOC_PATHS"
+
+        if [ ${#globs[@]} -eq 0 ]; then
+          globs=("**/*.meldoc.md")
+        fi
+
+        # Collect modified, added, renamed, untracked files across all globs.
+        # `git status --porcelain` second column is the path; for renames we keep the new path.
+        tmp=$(mktemp)
+        for g in "${globs[@]}"; do
+          git status --porcelain -- "$g" >> "$tmp" || true
+        done
+
+        # Extract paths: handle "XY path" and "R<sp>old -> new"
+        changed=$(awk '
+          {
+            # strip the two-char status and the space
+            sub(/^.. /, "");
+            if (index($0, " -> ") > 0) {
+              # rename: take destination
+              sub(/^.* -> /, "");
+            }
+            print
+          }
+        ' "$tmp" | sort -u | sed '/^$/d')
+        rm -f "$tmp"
+
+        if [ -z "$changed" ]; then
+          echo "has_changes=false" >> "$GITHUB_OUTPUT"
+          echo "files=" >> "$GITHUB_OUTPUT"
+          echo "::notice title=Meldoc sync::No documentation changes after pull"
+        else
+          echo "has_changes=true" >> "$GITHUB_OUTPUT"
+          {
+            echo "files<<DIFF_EOF"
+            echo "$changed"
+            echo "DIFF_EOF"
+          } >> "$GITHUB_OUTPUT"
+          echo "Changed files:"
+          echo "$changed"
+        fi
+
+    - name: Configure git identity
+      if: steps.check-token.outputs.has_token == 'true' && steps.diff.outputs.has_changes == 'true'
+      shell: bash
+      run: |
+        git config user.name "github-actions[bot]"
+        git config user.email "41898282+github-actions[bot]@users.noreply.github.com"
+
+    - name: Create or update pull request
+      if: steps.check-token.outputs.has_token == 'true' && steps.diff.outputs.has_changes == 'true'
+      id: pr
+      uses: peter-evans/create-pull-request@v7
+      with:
+        token: ${{ inputs.github_token }}
+        base: ${{ inputs.base_branch }}
+        branch: ${{ inputs.pr_branch }}
+        delete-branch: false
+        add-paths: ${{ inputs.paths }}
+        commit-message: ${{ inputs.commit_message }}
+        title: ${{ inputs.pr_title }}
+        labels: ${{ inputs.labels }}
+        body: |
+          Automated sync of documentation pulled from the Meldoc platform.
+
+          **Changed files**
+
+          ```
+          ${{ steps.diff.outputs.files }}
+          ```
+
+          Generated by `meldoc-io/git-actions/actions/sync-docs`.
+
+    - name: Enable auto-merge
+      if: steps.check-token.outputs.has_token == 'true' && steps.diff.outputs.has_changes == 'true' && inputs.auto_merge == 'true' && steps.pr.outputs.pull-request-number != ''
+      shell: bash
+      env:
+        GH_TOKEN: ${{ inputs.github_token }}
+        PR_NUMBER: ${{ steps.pr.outputs.pull-request-number }}
+        REPO: ${{ github.repository }}
+        MERGE_METHOD: ${{ inputs.merge_method }}
+      run: |
+        case "$MERGE_METHOD" in
+          merge|squash|rebase) ;;
+          *)
+            echo "::error title=Invalid merge_method::Got '$MERGE_METHOD', expected merge|squash|rebase"
+            exit 1
+            ;;
+        esac
+        gh pr merge "$PR_NUMBER" --repo "$REPO" --auto "--$MERGE_METHOD"
