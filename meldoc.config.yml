@@ -1,0 +1,5 @@
+# Which folders of this repository are which Meldoc documentation projects.
+workspaceAlias: meldoc
+baseDirs:
+  - projectAlias: actions
+    baseDir: docs/actions
