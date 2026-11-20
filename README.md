@@ -1,6 +1,6 @@
 # Git Actions
 
-A monorepo containing shared GitHub Actions and reusable workflows for meldoc repositories.
+A monorepo containing shared GitHub Actions and reusable workflows for [Meldoc](https://meldoc.io) repositories.
 
 ## Structure
 
